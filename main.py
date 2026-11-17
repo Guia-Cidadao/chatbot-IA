@@ -3,8 +3,9 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-import mysql.connector
+import certifi
 import numpy as np
+import pytds
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
@@ -30,12 +31,20 @@ if not GEMINI_API_KEY:
     raise RuntimeError("Defina GEMINI_API_KEY no arquivo .env")
 
 DB_CONFIG = {
-    "host": os.getenv("DB_HOST", "localhost"),
-    "port": int(os.getenv("DB_PORT", "3306")),
-    "user": os.getenv("DB_USER", "root"),
+    "server": os.getenv("DB_HOST", "localhost"),
+    "port": int(os.getenv("DB_PORT", "1433")),
+    "user": os.getenv("DB_USER", "guiacidadao"),
     "password": os.getenv("DB_PASSWORD", ""),
-    "database": os.getenv("DB_NAME", "guia_cidadao"),
+    "database": os.getenv("DB_NAME", "db-guiacidadao"),
+    "timeout": int(os.getenv("DB_CONNECT_TIMEOUT", "30")),
+    "login_timeout": int(os.getenv("DB_CONNECT_TIMEOUT", "30")),
+    "as_dict": True,
 }
+
+ssl_disabled = os.getenv("DB_SSL_DISABLED", "false").lower() in ("true", "1", "yes")
+if not ssl_disabled:
+    DB_CONFIG["cafile"] = os.getenv("DB_SSL_CA") or certifi.where()
+    DB_CONFIG["validate_host"] = False
 
 
 GENERATION_MODEL = "gemini-3.5-flash-lite"
@@ -87,29 +96,24 @@ def limpar_conversas_expiradas():
 
 
 # ----------------------------
-# Leitura dos dados no MySQL
+# Leitura dos dados no Azure SQL (SQL Server)
 # ----------------------------
-def buscar_servicos_no_mysql():
-    conexao = mysql.connector.connect(**DB_CONFIG)
-    cursor = conexao.cursor(dictionary=True)
-
-    try:
-        cursor.execute("""
-            SELECT
-                s.id AS servico_id,
-                s.nome,
-                s.descricao,
-                sd.ordem,
-                sd.documento
-            FROM servicos s
-            LEFT JOIN servicos_documentos sd
-                ON sd.servico_id = s.id
-            ORDER BY s.id, sd.ordem
-        """)
-        linhas = cursor.fetchall()
-    finally:
-        cursor.close()
-        conexao.close()
+def buscar_servicos_no_sql():
+    with pytds.connect(**DB_CONFIG) as conexao:
+        with conexao.cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    s.id AS servico_id,
+                    s.nome,
+                    s.descricao,
+                    sd.ordem,
+                    sd.documento
+                FROM servicos s
+                LEFT JOIN servicos_documentos sd
+                    ON sd.servico_id = s.id
+                ORDER BY s.id, sd.ordem
+            """)
+            linhas = cursor.fetchall()
 
 
     servicos = {}
@@ -137,11 +141,18 @@ def buscar_servicos_no_mysql():
 def recarregar_indice():
     global indice
 
-    servicos = buscar_servicos_no_mysql()
+    try:
+        servicos = buscar_servicos_no_sql()
+    except Exception as e:
+        logger.warning(
+            "Não foi possível carregar serviços do Azure SQL no momento (banco/tabelas podem ainda não estar prontos): %s",
+            e,
+        )
+        return
 
     if not servicos:
         indice = []
-        logger.warning("Nenhum serviço encontrado no MySQL.")
+        logger.warning("Nenhum serviço encontrado no Azure SQL.")
         return
 
     textos = []
@@ -276,6 +287,9 @@ async def perguntar(
         samesite="lax",
         max_age=TEMPO_EXPIRACAO
     )
+
+    if not indice:
+        await asyncio.to_thread(recarregar_indice)
 
     if not indice:
         raise HTTPException(
@@ -562,6 +576,15 @@ async def perguntar(
                 status_code=502,
                 detail="Não foi possível consultar a IA neste momento.",
             ) from e
+
+
+@app.post("/recarregar")
+async def recarregar():
+    await asyncio.to_thread(recarregar_indice)
+    return {
+        "status": "ok",
+        "servicos_indexados": len(indice),
+    }
 
 
 @app.get("/health")

@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+python-tds
+pyOpenSSL
+certifi
+google-genai
+numpy
+python-dotenv
+pydantic
