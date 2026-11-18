@@ -23,6 +23,7 @@ uvicorn main:app --reload
 ```
 
 Acesse http://127.0.0.1:8000/docs para usar pelo swagger.
+Ou acesse o link do deploy: https://webapp-guiacidadao-chatbot.azurewebsites.net/docs
 
 Lembre de colocar suas variaveis de ambiente no arquivo .env
 
